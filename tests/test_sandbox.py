@@ -114,6 +114,23 @@ class Strategy(BaseStrategy):
         return []
 """
 
+FRAME_WALK_ENGINE_LOCAL = """\
+from orderbook_pm_challenge.strategy import BaseStrategy
+
+class Strategy(BaseStrategy):
+    def on_step(self, state):
+        try:
+            raise RuntimeError("probe")
+        except RuntimeError as exc:
+            frame = exc.__traceback__.tb_frame
+
+        while frame is not None:
+            if "market" in frame.f_locals:
+                return ["escaped"]
+            frame = frame.f_back
+        return []
+"""
+
 
 class SandboxTests(unittest.TestCase):
     def test_good_strategy_succeeds_in_sandbox(self) -> None:
@@ -253,7 +270,34 @@ class SandboxTests(unittest.TestCase):
                 max_output_bytes=1024,
             )
             self.assertTrue(result.failed)
-            self.assertIn("stdout limit", result.error or "")
+            self.assertIn("output limit", result.error or "")
+        finally:
+            os.unlink(path)
+
+    def test_unsandboxed_runner_hides_engine_frames_from_strategy(self) -> None:
+        path = _write_strategy(FRAME_WALK_ENGINE_LOCAL)
+        try:
+            batch = run_batch(
+                strategy_path=path,
+                base_config=SHORT_CONFIG,
+                n_simulations=1,
+            )
+            self.assertEqual(batch.success_count, 1)
+            self.assertEqual(batch.failure_count, 0)
+        finally:
+            os.unlink(path)
+
+    def test_sandbox_runner_hides_engine_frames_from_strategy(self) -> None:
+        path = _write_strategy(FRAME_WALK_ENGINE_LOCAL)
+        try:
+            batch = run_batch(
+                strategy_path=path,
+                base_config=SHORT_CONFIG,
+                n_simulations=1,
+                sandbox=True,
+            )
+            self.assertEqual(batch.success_count, 1)
+            self.assertEqual(batch.failure_count, 0)
         finally:
             os.unlink(path)
 

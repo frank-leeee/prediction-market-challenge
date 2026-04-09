@@ -17,7 +17,6 @@ class SimulationEngine:
         self._seed = seed
 
     def run(self) -> SimulationResult:
-        strategy = self._strategy_factory()
         process = JumpDiffusionScoreProcess(self._config.process, seed=self._seed)
         starting_probability = process.current_true_probability()
 
@@ -28,8 +27,10 @@ class SimulationEngine:
         pending_buy_filled_quantity = 0.0
         pending_sell_filled_quantity = 0.0
         inventory_path: list[float] = []
+        strategy = None
 
         try:
+            strategy = self._strategy_factory()
             for step in range(self._config.process.n_steps):
                 market.refresh_competitor(step)
                 state = market.build_step_state(
@@ -83,6 +84,13 @@ class SimulationEngine:
                 settlement_outcome=0.0,
                 final_wealth=market.cash,
             )
+        finally:
+            close = getattr(strategy, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass
 
         outcome = 1.0 if process.current_score > self._config.process.terminal_threshold else 0.0
         final_wealth = market.settle(outcome=outcome)

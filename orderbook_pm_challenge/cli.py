@@ -5,7 +5,6 @@ import json
 from dataclasses import asdict, replace
 
 from .config import ChallengeConfig
-from .loader import load_strategy_factory
 from .runner import run_batch
 
 
@@ -50,13 +49,8 @@ def main(argv: list[str] | None = None) -> int:
     use_sandbox = args.sandbox
     num_workers = args.workers
 
-    # When running serial + unsandboxed, we can load the factory in-process
-    strategy_factory = None
-    if not use_sandbox and num_workers <= 1:
-        strategy_factory = load_strategy_factory(args.strategy_path)
-
     batch = run_batch(
-        strategy_factory,
+        None,
         strategy_path=args.strategy_path,
         base_config=base_config,
         n_simulations=args.simulations,

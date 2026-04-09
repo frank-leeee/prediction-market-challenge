@@ -1,34 +1,31 @@
-"""Sandbox execution for untrusted strategy code.
+"""Sandbox helpers for untrusted strategy code.
 
-Provides two layers of isolation:
+Strategies always run in a dedicated child process when sandbox mode is
+enabled. This module provides two extra layers for that child:
 
 1. **Python-level**: A restricted import hook blocks strategies from importing
-   dangerous modules (os, subprocess, socket, ctypes, etc.).  After the
+   dangerous modules (os, subprocess, socket, ctypes, etc.). After the
    strategy module is loaded, dangerous builtins (open, breakpoint) are also
-   replaced with stubs.  This is always active when sandbox mode is enabled.
+   replaced with stubs.
 
-2. **OS-level (nsjail)**: When nsjail is installed, the subprocess runs inside
-   a Linux namespace jail with no network access, read-only filesystem mounts,
-   memory/CPU limits, and PID isolation. nsjail is Linux-only; on other
-   platforms only Python-level sandboxing is applied.
+2. **OS-level (nsjail)**: When nsjail is installed, the strategy subprocess
+   runs inside a Linux namespace jail with no network access, read-only
+   filesystem mounts, memory/CPU limits, and PID isolation. nsjail is
+   Linux-only; on other platforms only Python-level sandboxing is applied.
 """
 
 from __future__ import annotations
 
 import builtins
 import importlib.util
-import json
 import os
 import shutil
-import subprocess
 import sys
-import tempfile
 import types
-from dataclasses import asdict
 from pathlib import Path
 
 from .config import ChallengeConfig, ParameterVariance
-from .results import RegimeSummary, SimulationResult
+from .results import SimulationResult
 
 # ---------------------------------------------------------------------------
 # Import allowlist - only these top-level modules may be imported by strategy
@@ -296,60 +293,6 @@ seccomp_string: "{NSJAIL_SECCOMP_POLICY.strip().replace(chr(10), ' ')}"
 """
 
 
-# ---------------------------------------------------------------------------
-# Sandboxed subprocess execution
-# ---------------------------------------------------------------------------
-
-
-def _result_from_dict(d: dict) -> SimulationResult:
-    """Reconstruct a SimulationResult from a dictionary."""
-    regime = RegimeSummary(**d.pop("regime"))
-    return SimulationResult(regime=regime, **d)
-
-
-def _make_failed_result(
-    seed: int, config: ChallengeConfig, error: str,
-) -> SimulationResult:
-    """Build a failed SimulationResult for sandbox-level errors."""
-    from .process import true_probability
-
-    initial_prob = true_probability(
-        config.process.initial_score, config.process.n_steps, config.process,
-    )
-    return SimulationResult(
-        seed=seed,
-        failed=True,
-        error=error,
-        regime=RegimeSummary.from_config(config, initial_probability=initial_prob),
-        total_edge=0.0,
-        retail_edge=0.0,
-        arb_edge=0.0,
-        traded_quantity=0.0,
-        traded_notional=0.0,
-        fill_count=0,
-        average_net_inventory=0.0,
-        average_abs_inventory=0.0,
-        max_abs_inventory=0.0,
-        final_cash=config.starting_cash,
-        final_yes_inventory=0.0,
-        final_no_inventory=0.0,
-        settlement_outcome=0.0,
-        final_wealth=config.starting_cash,
-    )
-
-
-def _read_text_with_limit(fileobj, *, limit: int) -> tuple[str | None, int]:
-    """Read UTF-8 text from a temporary file if it is within the size limit."""
-    fileobj.flush()
-    fileobj.seek(0, os.SEEK_END)
-    size = fileobj.tell()
-    fileobj.seek(0)
-    if size > limit:
-        return None, size
-    data = fileobj.read()
-    return data.decode("utf-8", errors="replace"), size
-
-
 def run_sandboxed_simulation(
     strategy_path: str,
     config: ChallengeConfig,
@@ -360,87 +303,18 @@ def run_sandboxed_simulation(
     timeout: int = 300,
     max_output_bytes: int = MAX_OUTPUT_BYTES,
 ) -> SimulationResult:
-    """Run a single simulation in a sandboxed subprocess.
+    """Run a single simulation with the strategy isolated in a sandboxed subprocess."""
+    from .engine import SimulationEngine
+    from .runner import sample_config
+    from .strategy_host import load_subprocess_strategy_factory
 
-    The subprocess loads the strategy with Python-level restrictions
-    (blocked imports / builtins).  When *nsjail_path* is provided the
-    process is additionally wrapped in an OS-level namespace jail.
-    """
-    worker_module = "orderbook_pm_challenge._sandbox_worker"
-    python_bin = sys.executable
-
-    task_payload = json.dumps({
-        "strategy_path": str(Path(strategy_path).resolve()),
-        "config": asdict(config),
-        "variance": asdict(variance),
-        "seed": seed,
-    })
-
-    with tempfile.TemporaryFile() as stdout_file, tempfile.TemporaryFile() as stderr_file:
-        try:
-            if nsjail_path:
-                package_path = str(Path(__file__).parent.resolve())
-                nsjail_cfg = _generate_nsjail_config(
-                    python_bin, strategy_path, package_path, time_limit=timeout,
-                )
-                cfg_fd, cfg_path = tempfile.mkstemp(suffix=".cfg", prefix="nsjail_pm_")
-                try:
-                    with os.fdopen(cfg_fd, "w") as f:
-                        f.write(nsjail_cfg)
-                    cmd = [nsjail_path, "--config", cfg_path, "--", python_bin, "-m", worker_module]
-                    proc = subprocess.run(
-                        cmd,
-                        input=(task_payload + "\n").encode("utf-8"),
-                        stdout=stdout_file,
-                        stderr=stderr_file,
-                        timeout=timeout,
-                    )
-                finally:
-                    os.unlink(cfg_path)
-            else:
-                cmd = [python_bin, "-m", worker_module]
-                proc = subprocess.run(
-                    cmd,
-                    input=(task_payload + "\n").encode("utf-8"),
-                    stdout=stdout_file,
-                    stderr=stderr_file,
-                    timeout=timeout,
-                )
-        except subprocess.TimeoutExpired:
-            return _make_failed_result(
-                seed,
-                config,
-                f"Sandbox worker timed out after {timeout} seconds",
-            )
-
-        stdout_text, stdout_size = _read_text_with_limit(stdout_file, limit=max_output_bytes)
-        stderr_text, stderr_size = _read_text_with_limit(stderr_file, limit=max_output_bytes)
-
-    if stdout_text is None:
-        return _make_failed_result(
-            seed,
-            config,
-            f"Sandbox worker exceeded stdout limit of {max_output_bytes} bytes ({stdout_size} bytes written)",
-        )
-    if stderr_text is None:
-        return _make_failed_result(
-            seed,
-            config,
-            f"Sandbox worker exceeded stderr limit of {max_output_bytes} bytes ({stderr_size} bytes written)",
-        )
-
-    # Try to parse the worker's JSON output regardless of exit code -
-    # the worker writes structured errors to stdout before exiting.
-    try:
-        output = json.loads(stdout_text.strip())
-    except (json.JSONDecodeError, ValueError):
-        output = None
-
-    if output is not None:
-        if output.get("success"):
-            return _result_from_dict(output["result"])
-        return _make_failed_result(seed, config, output.get("error", "Unknown sandbox error"))
-
-    # No valid JSON on stdout - fall back to stderr / exit code
-    error = stderr_text.strip() or f"Sandbox worker exited with code {proc.returncode}"
-    return _make_failed_result(seed, config, error)
+    sim_config = sample_config(config, variance, seed=seed)
+    strategy_factory = load_subprocess_strategy_factory(
+        strategy_path,
+        sandbox=True,
+        nsjail_path=nsjail_path,
+        timeout=timeout,
+        max_output_bytes=max_output_bytes,
+    )
+    engine = SimulationEngine(sim_config, strategy_factory, seed=seed)
+    return engine.run()

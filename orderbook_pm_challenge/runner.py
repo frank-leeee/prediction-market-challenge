@@ -8,6 +8,7 @@ import sys
 from .config import ChallengeConfig, ParameterVariance
 from .engine import SimulationEngine
 from .results import BatchResult, RegimeSummary, SimulationResult
+from .strategy_host import load_subprocess_strategy_factory
 
 
 def sample_config(
@@ -62,7 +63,6 @@ def _run_single_simulation(
         ParameterVariance,
         RetailFlowConfig,
     )
-    from .loader import load_strategy_factory
 
     base_config = ChallengeConfig(
         process=JumpDiffusionConfig(**base_config_dict["process"]),
@@ -77,7 +77,7 @@ def _run_single_simulation(
     variance = ParameterVariance(**variance_dict)
 
     config = sample_config(base_config, variance, seed=seed)
-    factory = load_strategy_factory(strategy_path)
+    factory = load_subprocess_strategy_factory(strategy_path)
     engine = SimulationEngine(config, factory, seed=seed)
     return asdict(engine.run())
 
@@ -108,8 +108,9 @@ def run_batch(
     Parameters
     ----------
     strategy_factory:
-        Callable that returns a Strategy instance. Not needed when
-        *strategy_path* is provided and *workers* > 1 or *sandbox* is True.
+        Callable that returns a trusted Strategy instance. When
+        *strategy_path* is provided, the harness isolates strategy execution
+        in a dedicated subprocess instead of calling the file in-process.
     strategy_path:
         Filesystem path to the strategy ``.py`` file. Required when using
         ``workers > 1`` or ``sandbox=True``.
@@ -135,13 +136,11 @@ def run_batch(
             raise ValueError("strategy_path is required when workers > 1")
         return _run_batch_parallel(strategy_path, base, var, count, seed_start, workers)
 
-    # Serial in-process execution (original behaviour)
+    # Serial execution with optional subprocess-backed strategy isolation.
     if strategy_factory is None:
         if strategy_path is None:
             raise ValueError("strategy_factory or strategy_path is required")
-        from .loader import load_strategy_factory
-
-        strategy_factory = load_strategy_factory(strategy_path)
+        strategy_factory = load_subprocess_strategy_factory(strategy_path)
 
     results = []
     for offset in range(count):
@@ -208,8 +207,8 @@ def _run_batch_sandboxed(
         )
 
     if workers > 1:
-        # Each simulation already runs in its own subprocess, so threads
-        # are sufficient for concurrency management here.
+        # Each simulation owns its own sandboxed strategy subprocess, so
+        # threads are sufficient for coordinating multiple runs here.
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
             results = list(pool.map(_run_one, seeds))
     else:
