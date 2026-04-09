@@ -1,0 +1,28 @@
+[project]
+name = "orderbook-pm-challenge"
+version = "0.1.0"
+description = "FIFO orderbook prediction market trading challenge"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+scientific = [
+    "numpy",
+    "scipy",
+    "pandas",
+]
+
+[project.scripts]
+orderbook-pm = "orderbook_pm_challenge.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+]
