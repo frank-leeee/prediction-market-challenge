@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import concurrent.futures
 from dataclasses import asdict, replace
+import math
+import multiprocessing
 import random
 import sys
 
@@ -53,6 +55,7 @@ def _run_single_simulation(
     base_config_dict: dict,
     variance_dict: dict,
     seed: int,
+    engine_backend: str,
 ) -> dict:
     """Execute one simulation in a worker process and return the result dict."""
     from .config import (
@@ -78,8 +81,51 @@ def _run_single_simulation(
 
     config = sample_config(base_config, variance, seed=seed)
     factory = load_strategy_factory(strategy_path)
-    engine = SimulationEngine(config, factory, seed=seed)
+    engine = SimulationEngine(config, factory, seed=seed, engine_backend=engine_backend)
     return asdict(engine.run())
+
+
+def _run_simulation_chunk(
+    strategy_path: str,
+    base_config_dict: dict,
+    variance_dict: dict,
+    seeds: tuple[int, ...],
+    engine_backend: str,
+) -> list[dict]:
+    """Execute a seed chunk in one worker to amortize startup/import cost."""
+    from .config import (
+        ChallengeConfig,
+        CompetitorConfig,
+        JumpDiffusionConfig,
+        ParameterVariance,
+        RetailFlowConfig,
+    )
+    from .loader import load_strategy_factory
+
+    base_config = ChallengeConfig(
+        process=JumpDiffusionConfig(**base_config_dict["process"]),
+        retail=RetailFlowConfig(**base_config_dict["retail"]),
+        competitor=CompetitorConfig(**base_config_dict["competitor"]),
+        min_price_tick=base_config_dict["min_price_tick"],
+        max_price_tick=base_config_dict["max_price_tick"],
+        share_quantum=base_config_dict["share_quantum"],
+        default_simulations=base_config_dict["default_simulations"],
+        starting_cash=base_config_dict["starting_cash"],
+    )
+    variance = ParameterVariance(**variance_dict)
+    factory = load_strategy_factory(strategy_path)
+
+    return [
+        asdict(
+            SimulationEngine(
+                sample_config(base_config, variance, seed=seed),
+                factory,
+                seed=seed,
+                engine_backend=engine_backend,
+            ).run()
+        )
+        for seed in seeds
+    ]
 
 
 def _result_from_dict(d: dict) -> SimulationResult:
@@ -102,6 +148,7 @@ def run_batch(
     seed_start: int = 0,
     workers: int = 1,
     sandbox: bool = False,
+    engine_backend: str = "python",
 ) -> BatchResult:
     """Run a batch of simulations.
 
@@ -133,7 +180,7 @@ def run_batch(
     if workers > 1:
         if strategy_path is None:
             raise ValueError("strategy_path is required when workers > 1")
-        return _run_batch_parallel(strategy_path, base, var, count, seed_start, workers)
+        return _run_batch_parallel(strategy_path, base, var, count, seed_start, workers, engine_backend)
 
     # Serial in-process execution (original behaviour)
     if strategy_factory is None:
@@ -147,7 +194,7 @@ def run_batch(
     for offset in range(count):
         seed = seed_start + offset
         config = sample_config(base, var, seed=seed)
-        engine = SimulationEngine(config, strategy_factory, seed=seed)
+        engine = SimulationEngine(config, strategy_factory, seed=seed, engine_backend=engine_backend)
         results.append(engine.run())
     return BatchResult(simulation_results=tuple(results))
 
@@ -164,17 +211,26 @@ def _run_batch_parallel(
     count: int,
     seed_start: int,
     workers: int,
+    engine_backend: str,
 ) -> BatchResult:
     base_dict = asdict(base)
     var_dict = asdict(var)
     seeds = [seed_start + offset for offset in range(count)]
+    # Keep several chunks per worker so seed variance does not create stragglers.
+    chunk_size = max(1, math.ceil(count / (workers * 4)))
+    seed_chunks = [tuple(seeds[idx: idx + chunk_size]) for idx in range(0, len(seeds), chunk_size)]
+    executor_kwargs = {"max_workers": workers}
 
-    with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as pool:
+    # Fork keeps worker startup cheap on POSIX and preserves deterministic child work.
+    if sys.platform != "win32":
+        executor_kwargs["mp_context"] = multiprocessing.get_context("fork")
+
+    with concurrent.futures.ProcessPoolExecutor(**executor_kwargs) as pool:
         futures = [
-            pool.submit(_run_single_simulation, strategy_path, base_dict, var_dict, seed)
-            for seed in seeds
+            pool.submit(_run_simulation_chunk, strategy_path, base_dict, var_dict, seed_chunk, engine_backend)
+            for seed_chunk in seed_chunks
         ]
-        result_dicts = [f.result() for f in futures]
+        result_dicts = [result for future in futures for result in future.result()]
 
     return BatchResult(simulation_results=tuple(_result_from_dict(d) for d in result_dicts))
 

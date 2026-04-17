@@ -11,14 +11,26 @@ from .utils import average, quantize_down
 
 
 class SimulationEngine:
-    def __init__(self, config: ChallengeConfig, strategy_factory, *, seed: int) -> None:
+    def __init__(
+        self,
+        config: ChallengeConfig,
+        strategy_factory,
+        *,
+        seed: int,
+        engine_backend: str = "python",
+    ) -> None:
         self._config = config
         self._strategy_factory = strategy_factory
         self._seed = seed
+        self._engine_backend = engine_backend
 
     def run(self) -> SimulationResult:
         strategy = self._strategy_factory()
-        process = JumpDiffusionScoreProcess(self._config.process, seed=self._seed)
+        process = JumpDiffusionScoreProcess(
+            self._config.process,
+            seed=self._seed,
+            engine_backend=self._engine_backend,
+        )
         starting_probability = process.current_true_probability()
 
         market = PredictionMarket(self._config)

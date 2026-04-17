@@ -2,11 +2,27 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from dataclasses import asdict, replace
 
+from .backend import resolve_engine_backend
 from .config import ChallengeConfig
 from .loader import load_strategy_factory
 from .runner import run_batch
+
+
+def resolve_worker_count(
+    requested_workers: int | None,
+    *,
+    n_simulations: int,
+    sandbox: bool,
+) -> int:
+    if requested_workers is not None:
+        return requested_workers
+    if sandbox or n_simulations <= 1:
+        return 1
+    cpu_count = os.cpu_count() or 1
+    return max(1, min(cpu_count, n_simulations))
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -20,10 +36,16 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--seed-start", type=int, default=0, help="Starting simulation seed")
     run_parser.add_argument("--json", action="store_true", help="Print full JSON results")
     run_parser.add_argument(
+        "--engine",
+        choices=("auto", "python", "rust"),
+        default="auto",
+        help="Execution backend (default: auto; rust falls back to python if unavailable)",
+    )
+    run_parser.add_argument(
         "--workers",
         type=int,
-        default=1,
-        help="Number of parallel workers (default: 1, serial execution)",
+        default=None,
+        help="Number of parallel workers (default: auto for unsandboxed multi-simulation runs)",
     )
     run_parser.add_argument(
         "--sandbox",
@@ -48,7 +70,13 @@ def main(argv: list[str] | None = None) -> int:
         base_config = replace(base_config, process=replace(base_config.process, n_steps=args.steps))
 
     use_sandbox = args.sandbox
-    num_workers = args.workers
+    engine_backend = resolve_engine_backend(args.engine, sandbox=use_sandbox)
+    simulation_count = args.simulations or base_config.default_simulations
+    num_workers = resolve_worker_count(
+        args.workers,
+        n_simulations=simulation_count,
+        sandbox=use_sandbox,
+    )
 
     # When running serial + unsandboxed, we can load the factory in-process
     strategy_factory = None
@@ -59,10 +87,11 @@ def main(argv: list[str] | None = None) -> int:
         strategy_factory,
         strategy_path=args.strategy_path,
         base_config=base_config,
-        n_simulations=args.simulations,
+        n_simulations=simulation_count,
         seed_start=args.seed_start,
         workers=num_workers,
         sandbox=use_sandbox,
+        engine_backend=engine_backend,
     )
 
     if args.json:

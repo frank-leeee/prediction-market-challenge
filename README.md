@@ -28,6 +28,7 @@ it settles to `0`.
 ## Setup
 
 Requires [uv](https://docs.astral.sh/uv/getting-started/installation/).
+Optional Rust acceleration requires a local Rust toolchain.
 
 ```bash
 # Install dependencies and create virtualenv
@@ -42,6 +43,13 @@ uv sync --extra scientific
 ```bash
 # Quick smoke run
 uv run orderbook-pm run examples/starter_strategy.py --simulations 5 --steps 100
+
+# Multi-simulation runs automatically use available CPU cores by default
+uv run orderbook-pm run examples/starter_strategy.py --simulations 200
+
+# Select execution backend explicitly
+uv run orderbook-pm run examples/starter_strategy.py --simulations 200 --engine rust
+uv run orderbook-pm run examples/starter_strategy.py --simulations 200 --engine python
 
 # Full JSON output
 uv run orderbook-pm run examples/starter_strategy.py --json

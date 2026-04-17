@@ -7,6 +7,7 @@ from .config import (
     ParameterVariance,
     RetailFlowConfig,
 )
+from .backend import resolve_engine_backend, rust_backend_available
 from .engine import SimulationEngine
 from .results import BatchResult, RegimeSummary, SimulationResult
 from .runner import run_batch, sample_config
@@ -37,6 +38,8 @@ __all__ = [
     "PlaceOrder",
     "RegimeSummary",
     "RetailFlowConfig",
+    "resolve_engine_backend",
+    "rust_backend_available",
     "SimulationEngine",
     "SimulationResult",
     "Side",

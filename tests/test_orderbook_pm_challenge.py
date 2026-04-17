@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import unittest
+from unittest import mock
 
+from orderbook_pm_challenge.backend import resolve_engine_backend
+from orderbook_pm_challenge.cli import resolve_worker_count
 from orderbook_pm_challenge.config import ChallengeConfig, CompetitorConfig, JumpDiffusionConfig
 from orderbook_pm_challenge.engine import SimulationEngine
 from orderbook_pm_challenge.market import PredictionMarket
@@ -19,11 +22,28 @@ class PassiveStrategy:
 
 
 class OrderbookChallengeTests(unittest.TestCase):
+    def test_resolve_worker_count_defaults_to_auto_for_unsandboxed_batches(self) -> None:
+        self.assertEqual(resolve_worker_count(None, n_simulations=1, sandbox=False), 1)
+        self.assertEqual(resolve_worker_count(None, n_simulations=4, sandbox=True), 1)
+        self.assertEqual(resolve_worker_count(3, n_simulations=20, sandbox=False), 3)
+        self.assertGreaterEqual(resolve_worker_count(None, n_simulations=20, sandbox=False), 1)
+
     def test_initial_competitor_quotes_follow_start_price_and_spread(self) -> None:
         config = ChallengeConfig(competitor=CompetitorConfig(spread_ticks=2, quote_notional=10.0))
         market = PredictionMarket(config)
         market.initialize_competitor(0.503)
         self.assertEqual(market.competitor_best_quotes(), (49, 52))
+
+    def test_resolve_engine_backend_defaults_to_python_in_sandbox(self) -> None:
+        self.assertEqual(resolve_engine_backend("auto", sandbox=True), "python")
+        self.assertEqual(resolve_engine_backend("python", sandbox=True), "python")
+        with self.assertRaises(ValueError):
+            resolve_engine_backend("rust", sandbox=True)
+
+    def test_resolve_engine_backend_uses_rust_when_available(self) -> None:
+        with mock.patch("orderbook_pm_challenge.backend.rust_backend_available", return_value=True):
+            self.assertEqual(resolve_engine_backend("auto", sandbox=False), "rust")
+            self.assertEqual(resolve_engine_backend("python", sandbox=False), "python")
 
     def test_uncovered_sell_fill_creates_no_inventory(self) -> None:
         market = PredictionMarket(ChallengeConfig())

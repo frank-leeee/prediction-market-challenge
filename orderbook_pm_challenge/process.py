@@ -4,6 +4,7 @@ import math
 import random
 from dataclasses import dataclass
 
+from .backend import require_rust_backend
 from .config import JumpDiffusionConfig
 
 
@@ -69,7 +70,6 @@ def true_probability(
             conditional = 1.0 if shifted_score > 0.0 else 0.0
         else:
             conditional = standard_normal_cdf(shifted_score / math.sqrt(future_variance))
-
         probability += weight * conditional
 
     return min(1.0, max(0.0, probability))
@@ -96,11 +96,24 @@ class JumpDiffusionScoreProcess:
 
     config: JumpDiffusionConfig
     seed: int | None = None
+    engine_backend: str = "python"
 
     def __post_init__(self) -> None:
         self._rng = random.Random(self.seed)
         self._score = self.config.initial_score
         self._step = 0
+        self._rust_probability_kernel = None
+        if self.engine_backend == "rust":
+            rust_sim = require_rust_backend()
+            self._rust_probability_kernel = rust_sim.ProbabilityKernel(
+                self.config.n_steps,
+                self.config.diffusion_sigma,
+                self.config.jump_intensity,
+                self.config.jump_mean,
+                self.config.jump_sigma,
+                self.config.terminal_threshold,
+                self.config.poisson_tail_mass,
+            )
 
     @property
     def current_score(self) -> float:
@@ -114,6 +127,11 @@ class JumpDiffusionScoreProcess:
         return max(0, self.config.n_steps - self._step)
 
     def current_true_probability(self) -> float:
+        if self.engine_backend == "rust":
+            return self._rust_probability_kernel.true_probability(
+                self._score,
+                self.steps_remaining(),
+            )
         return true_probability(self._score, self.steps_remaining(), self.config)
 
     def step(self) -> float:

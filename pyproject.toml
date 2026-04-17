@@ -16,8 +16,13 @@ scientific = [
 orderbook-pm = "orderbook_pm_challenge.cli:main"
 
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+requires = ["maturin>=1.8,<2.0"]
+build-backend = "maturin"
+
+[tool.maturin]
+python-source = "."
+module-name = "orderbook_pm_challenge._rust_sim"
+features = ["pyo3/extension-module"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
